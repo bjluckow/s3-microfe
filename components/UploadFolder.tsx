@@ -1,8 +1,7 @@
 "use client";
 import { useRef, useState } from "react";
-import { zipFolder } from "@/lib/zip";
 
-type Stage = "idle" | "zipping" | "uploading";
+type Stage = "idle" | "uploading";
 
 interface UploadFolderProps {
     folder?: string;
@@ -46,6 +45,29 @@ async function readEntry(entry: FileSystemEntry): Promise<File[]> {
     return [];
 }
 
+async function uploadFile(file: File, folder: string): Promise<void> {
+    const relativePath = file.webkitRelativePath || file.name;
+
+    const res = await fetch("/api/upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            filename: relativePath,
+            contentType: file.type || "application/octet-stream",
+            folder,
+        }),
+    });
+    const { url } = await res.json();
+
+    await new Promise<void>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("PUT", url);
+        xhr.onload = () => resolve();
+        xhr.onerror = () => reject(new Error(`Failed: ${relativePath}`));
+        xhr.send(file);
+    });
+}
+
 export default function UploadFolder({
     folder = "uploads",
     onFileChange,
@@ -60,91 +82,28 @@ export default function UploadFolder({
     } | null>(null);
     const [dragging, setDragging] = useState(false);
 
-    async function uploadDirect(file: File) {
-        setMessage(null);
-        setProgress(0);
-        setFilename(file.name);
-
-        try {
-            setStage("uploading");
-            const res = await fetch("/api/upload", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    filename: file.name,
-                    contentType: file.type || "application/zip",
-                    folder,
-                }),
-            });
-            const { url } = await res.json();
-
-            await new Promise<void>((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open("PUT", url);
-                xhr.upload.onprogress = (e) => {
-                    if (e.lengthComputable) {
-                        setProgress(Math.round((e.loaded / e.total) * 100));
-                    }
-                };
-                xhr.onload = () => resolve();
-                xhr.onerror = () => reject(new Error("Upload failed"));
-                xhr.send(file);
-            });
-
-            setMessage({ text: `✓ ${file.name} uploaded`, ok: true });
-            onFileChange?.();
-        } catch (err) {
-            setMessage({
-                text: `✗ ${err instanceof Error ? err.message : "Something went wrong"}`,
-                ok: false,
-            });
-        } finally {
-            setStage("idle");
-            setProgress(0);
-        }
-    }
-
     async function processFiles(files: File[]) {
         if (!files.length) return;
 
         setMessage(null);
         setProgress(0);
+        setStage("uploading");
+
+        let completed = 0;
 
         try {
-            setStage("zipping");
-            const zipped = await zipFolder(files);
-            setFilename(zipped.name);
+            for (const file of files) {
+                setFilename(`${completed + 1} / ${files.length} files`);
+                await uploadFile(file, folder);
+                completed++;
+                setProgress(Math.round((completed / files.length) * 100));
+            }
 
-            const res = await fetch("/api/upload", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    filename: zipped.name,
-                    contentType: zipped.type,
-                    folder,
-                }),
-            });
-            const { url } = await res.json();
-
-            setStage("uploading");
-            await new Promise<void>((resolve, reject) => {
-                const xhr = new XMLHttpRequest();
-                xhr.open("PUT", url);
-                xhr.upload.onprogress = (e) => {
-                    if (e.lengthComputable) {
-                        setProgress(Math.round((e.loaded / e.total) * 100));
-                    }
-                };
-                xhr.onload = () => resolve();
-                xhr.onerror = () => reject(new Error("Upload failed"));
-                xhr.send(zipped);
-            });
-
-            setMessage({ text: `✓ ${zipped.name} uploaded`, ok: true });
+            setMessage({ text: `✓ ${completed} files uploaded`, ok: true });
             onFileChange?.();
         } catch (err) {
             setMessage({
-                text: `✗ ${err instanceof Error ? err.message : "Something went wrong"}`,
+                text: `✗ ${err instanceof Error ? err.message : "Something went wrong"} (${completed}/${files.length} completed)`,
                 ok: false,
             });
         } finally {
@@ -172,9 +131,8 @@ export default function UploadFolder({
         const allFiles = (await Promise.all(entries.map(readEntry))).flat();
         if (!allFiles.length) return;
 
-        // If single zip file dropped, upload directly without zipping
-        if (allFiles.length === 1 && allFiles[0].name.endsWith(".zip")) {
-            await uploadDirect(allFiles[0]);
+        if (allFiles.length === 1) {
+            await processFiles(allFiles);
             return;
         }
 
@@ -210,41 +168,29 @@ export default function UploadFolder({
                 {stage === "idle" && (
                     <span>
                         {dragging ? (
-                            "Drop to zip & upload"
+                            "Drop to upload"
                         ) : (
                             <>
-                                📁 Drag & Drop your folders or <u>Browse</u>{" "}
-                                (auto-zip)
+                                📁 Drag & Drop your folders or <u>Browse</u>
                             </>
                         )}
                     </span>
                 )}
 
-                {(stage === "zipping" || stage === "uploading") && (
+                {stage === "uploading" && (
                     <div className="w-full space-y-1">
                         <div className="flex justify-between text-xs">
                             <span>{filename}</span>
-                            <span>
-                                {stage === "zipping"
-                                    ? "Zipping..."
-                                    : `${progress}%`}
-                            </span>
+                            <span>{progress}%</span>
                         </div>
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-gray-200">
                             <div
                                 className="h-full rounded-full bg-gray-400 transition-all duration-200"
-                                style={{
-                                    width:
-                                        stage === "zipping"
-                                            ? "100%"
-                                            : `${progress}%`,
-                                }}
+                                style={{ width: `${progress}%` }}
                             />
                         </div>
                         <p className="text-xs text-gray-400">
-                            {stage === "zipping"
-                                ? "Compressing files..."
-                                : "Uploading to S3..."}
+                            Uploading to S3...
                         </p>
                     </div>
                 )}
