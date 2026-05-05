@@ -60,6 +60,50 @@ export default function UploadFolder({
     } | null>(null);
     const [dragging, setDragging] = useState(false);
 
+    async function uploadDirect(file: File) {
+        setMessage(null);
+        setProgress(0);
+        setFilename(file.name);
+
+        try {
+            setStage("uploading");
+            const res = await fetch("/api/upload", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    filename: file.name,
+                    contentType: file.type || "application/zip",
+                    folder,
+                }),
+            });
+            const { url } = await res.json();
+
+            await new Promise<void>((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.open("PUT", url);
+                xhr.upload.onprogress = (e) => {
+                    if (e.lengthComputable) {
+                        setProgress(Math.round((e.loaded / e.total) * 100));
+                    }
+                };
+                xhr.onload = () => resolve();
+                xhr.onerror = () => reject(new Error("Upload failed"));
+                xhr.send(file);
+            });
+
+            setMessage({ text: `✓ ${file.name} uploaded`, ok: true });
+            onFileChange?.();
+        } catch (err) {
+            setMessage({
+                text: `✗ ${err instanceof Error ? err.message : "Something went wrong"}`,
+                ok: false,
+            });
+        } finally {
+            setStage("idle");
+            setProgress(0);
+        }
+    }
+
     async function processFiles(files: File[]) {
         if (!files.length) return;
 
@@ -127,6 +171,12 @@ export default function UploadFolder({
 
         const allFiles = (await Promise.all(entries.map(readEntry))).flat();
         if (!allFiles.length) return;
+
+        // If single zip file dropped, upload directly without zipping
+        if (allFiles.length === 1 && allFiles[0].name.endsWith(".zip")) {
+            await uploadDirect(allFiles[0]);
+            return;
+        }
 
         await processFiles(allFiles);
     }
